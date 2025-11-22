@@ -1,9 +1,16 @@
 name: 🗑️ حذف الأكواد المنتهية تلقائياً
 
 on:
+  # يعمل تلقائياً عند تعديل ملف Codes
+  push:
+    paths:
+      - 'Codes'
+  
+  # يعمل تلقائياً كل 5 دقائق
   schedule:
-    # كل 5 دقائق
     - cron: '*/5 * * * *'
+  
+  # يمكنك تشغيله يدوياً أيضاً
   workflow_dispatch:
 
 permissions:
@@ -152,19 +159,34 @@ jobs:
         echo "EXIT_CODE=$CLEANUP_EXIT_CODE" >> $GITHUB_ENV
     
     - name: 📤 رفع التغييرات
-      if: env.EXIT_CODE == '0'
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "🤖 GitHub Actions Bot"
+        
+        # إضافة ملف Codes
         git add Codes
         
+        # فحص التغييرات
         if git diff --staged --quiet; then
-          echo "✅ لا توجد تغييرات للرفع"
+          echo "✅ لا توجد تغييرات - جميع الأكواد صالحة"
         else
+          echo "📝 تم العثور على تغييرات - سيتم رفعها..."
+          
+          # عرض التغييرات
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          git diff --staged
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # عمل Commit
           TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
           git commit -m "🗑️ حذف الأكواد المنتهية تلقائياً [$TIMESTAMP]"
-          git push
+          
+          # رفع التغييرات
+          echo "⬆️ جاري رفع التغييرات إلى GitHub..."
+          git push origin main || git push origin master
+          
           echo "✅ تم رفع التغييرات بنجاح!"
+          echo "🔗 تحقق من الملف: https://github.com/${{ github.repository }}/blob/main/Codes"
         fi
     
     - name: ℹ️ لا توجد أكواد منتهية
