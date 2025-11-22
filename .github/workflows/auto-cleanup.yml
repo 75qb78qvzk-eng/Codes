@@ -1,4 +1,4 @@
-name: 🗑️ حذف الأكواد المنتهية تلقائياً
+name: 🗑️ حذف الأكواد المنتهية (دقيق)
 
 on:
   # يعمل تلقائياً عند تعديل ملف Codes
@@ -6,11 +6,11 @@ on:
     paths:
       - 'Codes'
   
-  # يعمل تلقائياً كل دقيقة واحدة
+  # يعمل تلقائياً كل دقيقة (للتأكد)
   schedule:
     - cron: '* * * * *'
   
-  # يمكنك تشغيله يدوياً أيضاً
+  # يمكنك تشغيله يدوياً
   workflow_dispatch:
 
 permissions:
@@ -29,12 +29,13 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: 🔍 فحص وحذف الأكواد المنتهية
+    - name: 🔍 فحص وحذف الأكواد المنتهية (دقيق)
       run: |
         cat << 'PYTHON_SCRIPT' > cleanup_temp.py
         from datetime import datetime, timedelta
         import sys
         import os
+        import time
         
         def parse_duration(duration_str):
             """تحويل المدة إلى timedelta"""
@@ -52,9 +53,9 @@ jobs:
                 return None
             return None
         
-        print("=" * 60)
-        print("🔍 بدء فحص الأكواد...")
-        print("=" * 60)
+        print("=" * 70)
+        print("🔍 بدء فحص الأكواد (نظام دقيق)...")
+        print("=" * 70)
         
         # التأكد من وجود الملف
         if not os.path.exists('Codes'):
@@ -71,12 +72,15 @@ jobs:
         
         now = datetime.utcnow()
         print(f"⏰ الوقت الحالي (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"⏰ بالميلي ثانية: {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         print()
         
         valid_codes = []
         deleted_codes = []
+        pending_codes = []
         deleted_count = 0
         
+        # المرحلة 1: فحص جميع الأكواد
         for line in lines:
             line = line.strip()
             if not line:
@@ -103,40 +107,49 @@ jobs:
                 
                 # حساب وقت الانتهاء
                 expiry_date = code_date + duration
-                time_diff = expiry_date - now
+                time_diff = (expiry_date - now).total_seconds()
                 
-                if now < expiry_date:
-                    # الكود صالح
+                if time_diff > 0:
+                    # الكود لا يزال صالحاً
                     valid_codes.append(line)
                     
                     # حساب الوقت المتبقي
-                    total_seconds = int(time_diff.total_seconds())
-                    if total_seconds > 86400:
-                        remaining = f"{total_seconds // 86400} يوم"
-                    elif total_seconds > 3600:
-                        remaining = f"{total_seconds // 3600} ساعة"
-                    elif total_seconds > 60:
-                        remaining = f"{total_seconds // 60} دقيقة"
+                    if time_diff > 86400:
+                        remaining = f"{int(time_diff // 86400)} يوم"
+                    elif time_diff > 3600:
+                        remaining = f"{int(time_diff // 3600)} ساعة"
+                    elif time_diff > 60:
+                        remaining = f"{int(time_diff // 60)} دقيقة"
                     else:
-                        remaining = f"{total_seconds} ثانية"
+                        remaining = f"{int(time_diff)} ثانية"
                     
                     print(f"✅ [{code}] صالح - متبقي: {remaining}")
+                    
+                    # إذا كان سينتهي خلال دقيقتين، نضعه في قائمة الانتظار
+                    if time_diff <= 120:
+                        pending_codes.append({
+                            'code': code,
+                            'line': line,
+                            'expiry': expiry_date,
+                            'wait_seconds': time_diff
+                        })
+                        print(f"   ⏳ سينتهي خلال {int(time_diff)} ثانية - في قائمة الانتظار")
+                
                 else:
                     # الكود منتهي
                     deleted_count += 1
                     deleted_codes.append(code)
                     
                     # حساب الوقت المنقضي
-                    time_passed = now - expiry_date
-                    total_seconds = int(time_passed.total_seconds())
-                    if total_seconds > 86400:
-                        passed = f"{total_seconds // 86400} يوم"
-                    elif total_seconds > 3600:
-                        passed = f"{total_seconds // 3600} ساعة"
-                    elif total_seconds > 60:
-                        passed = f"{total_seconds // 60} دقيقة"
+                    time_passed = abs(time_diff)
+                    if time_passed > 86400:
+                        passed = f"{int(time_passed // 86400)} يوم"
+                    elif time_passed > 3600:
+                        passed = f"{int(time_passed // 3600)} ساعة"
+                    elif time_passed > 60:
+                        passed = f"{int(time_passed // 60)} دقيقة"
                     else:
-                        passed = f"{total_seconds} ثانية"
+                        passed = f"{int(time_passed)} ثانية"
                     
                     print(f"🗑️  [{code}] منتهي منذ {passed} - سيتم حذفه")
             
@@ -146,7 +159,27 @@ jobs:
                 continue
         
         print()
-        print("=" * 60)
+        print("=" * 70)
+        
+        # المرحلة 2: الانتظار الدقيق للأكواد القريبة من الانتهاء
+        if pending_codes:
+            print(f"⏳ انتظار دقيق لـ {len(pending_codes)} كود(أكواد) قريب(ة) من الانتهاء...")
+            print("=" * 70)
+            
+            for item in pending_codes:
+                if item['wait_seconds'] > 0:
+                    print(f"⏱️  انتظار {int(item['wait_seconds'])} ثانية لـ [{item['code']}]...")
+                    time.sleep(item['wait_seconds'])
+                    
+                    # إزالة من القائمة الصالحة وإضافة للمحذوفة
+                    valid_codes.remove(item['line'])
+                    deleted_codes.append(item['code'])
+                    deleted_count += 1
+                    
+                    now_after = datetime.utcnow()
+                    print(f"✓ [{item['code']}] تم حذفه في {now_after.strftime('%H:%M:%S')} بالضبط!")
+            
+            print("=" * 70)
         
         # كتابة الأكواد الصالحة فقط
         try:
@@ -167,16 +200,16 @@ jobs:
             print(f"❌ خطأ في كتابة الملف: {e}")
             sys.exit(1)
         
-        print("=" * 60)
+        print("=" * 70)
         
         # التحقق من الكتابة
         try:
             with open('Codes', 'r', encoding='utf-8') as f:
                 new_content = f.read()
                 print(f"\n✓ محتوى الملف بعد الحذف:")
-                print("─" * 40)
-                print(new_content if new_content.strip() else "(الملف فارغ)")
-                print("─" * 40)
+                print("─" * 50)
+                print(new_content if new_content.strip() else "(الملف فارغ - تم حذف جميع الأكواد)")
+                print("─" * 50)
         except:
             pass
         
@@ -184,9 +217,9 @@ jobs:
         sys.exit(0 if deleted_count > 0 else 1)
         PYTHON_SCRIPT
         
-        python cleanup_temp.py
+        timeout 600 python cleanup_temp.py
         CLEANUP_EXIT_CODE=$?
-        rm cleanup_temp.py
+        rm -f cleanup_temp.py
         
         echo "CLEANUP_RESULT=$CLEANUP_EXIT_CODE" >> $GITHUB_ENV
     
@@ -211,7 +244,7 @@ jobs:
           
           # عمل Commit
           TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
-          git commit -m "🗑️ حذف الأكواد المنتهية تلقائياً [$TIMESTAMP]"
+          git commit -m "🗑️ حذف دقيق للأكواد المنتهية [$TIMESTAMP]"
           
           # رفع التغييرات
           echo "⬆️ جاري رفع التغييرات إلى GitHub..."
