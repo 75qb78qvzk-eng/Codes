@@ -1,0 +1,172 @@
+name: 🗑️ حذف الأكواد المنتهية تلقائياً
+
+on:
+  schedule:
+    # كل 5 دقائق
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 تحميل المشروع
+      uses: actions/checkout@v3
+    
+    - name: 🐍 تثبيت Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: 🔍 فحص وحذف الأكواد المنتهية
+      run: |
+        cat << 'PYTHON_SCRIPT' > cleanup_temp.py
+        from datetime import datetime, timedelta
+        import sys
+        
+        def parse_duration(duration_str):
+            """تحويل المدة إلى timedelta"""
+            duration_str = duration_str.strip().lower()
+            try:
+                if duration_str.endswith('s'):
+                    return timedelta(seconds=int(duration_str[:-1]))
+                elif duration_str.endswith('m'):
+                    return timedelta(minutes=int(duration_str[:-1]))
+                elif duration_str.endswith('h'):
+                    return timedelta(hours=int(duration_str[:-1]))
+                elif duration_str.endswith('d'):
+                    return timedelta(days=int(duration_str[:-1]))
+            except:
+                return None
+            return None
+        
+        print("=" * 60)
+        print("🔍 بدء فحص الأكواد...")
+        print("=" * 60)
+        
+        try:
+            with open('Codes', 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            print("❌ ملف Codes غير موجود!")
+            sys.exit(0)
+        
+        now = datetime.now()
+        print(f"⏰ الوقت الحالي: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+        print()
+        
+        valid_codes = []
+        deleted_count = 0
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                parts = line.split('|')
+                if len(parts) != 3:
+                    print(f"⚠️  سطر بصيغة خاطئة: {line}")
+                    continue
+                
+                code = parts[0].strip()
+                date_str = parts[1].strip()
+                duration_str = parts[2].strip()
+                
+                # تحليل التاريخ
+                code_date = datetime.fromisoformat(date_str)
+                
+                # تحليل المدة
+                duration = parse_duration(duration_str)
+                if duration is None:
+                    print(f"⚠️  مدة غير صالحة لـ [{code}]: {duration_str}")
+                    continue
+                
+                # حساب وقت الانتهاء
+                expiry_date = code_date + duration
+                time_diff = expiry_date - now
+                
+                if now < expiry_date:
+                    # الكود صالح
+                    valid_codes.append(line)
+                    
+                    # حساب الوقت المتبقي
+                    total_seconds = int(time_diff.total_seconds())
+                    if total_seconds > 86400:
+                        remaining = f"{total_seconds // 86400} يوم"
+                    elif total_seconds > 3600:
+                        remaining = f"{total_seconds // 3600} ساعة"
+                    elif total_seconds > 60:
+                        remaining = f"{total_seconds // 60} دقيقة"
+                    else:
+                        remaining = f"{total_seconds} ثانية"
+                    
+                    print(f"✅ [{code}] صالح - متبقي: {remaining}")
+                else:
+                    # الكود منتهي
+                    deleted_count += 1
+                    
+                    # حساب الوقت المنقضي
+                    time_passed = now - expiry_date
+                    total_seconds = int(time_passed.total_seconds())
+                    if total_seconds > 86400:
+                        passed = f"{total_seconds // 86400} يوم"
+                    elif total_seconds > 3600:
+                        passed = f"{total_seconds // 3600} ساعة"
+                    elif total_seconds > 60:
+                        passed = f"{total_seconds // 60} دقيقة"
+                    else:
+                        passed = f"{total_seconds} ثانية"
+                    
+                    print(f"🗑️  [{code}] منتهي منذ {passed} - تم حذفه")
+            
+            except Exception as e:
+                print(f"❌ خطأ في معالجة السطر: {line}")
+                print(f"   التفاصيل: {str(e)}")
+                continue
+        
+        # كتابة الأكواد الصالحة
+        with open('Codes', 'w', encoding='utf-8') as f:
+            for code in valid_codes:
+                f.write(code + '\n')
+        
+        print()
+        print("=" * 60)
+        print("✅ تم الانتهاء من الفحص!")
+        print(f"📊 الأكواد الصالحة: {len(valid_codes)}")
+        print(f"🗑️  الأكواد المحذوفة: {deleted_count}")
+        print("=" * 60)
+        
+        # إرجاع 0 إذا تم حذف أكواد، 1 إذا لم يتم حذف شيء
+        sys.exit(0 if deleted_count > 0 else 1)
+        PYTHON_SCRIPT
+        
+        python cleanup_temp.py
+        CLEANUP_EXIT_CODE=$?
+        rm cleanup_temp.py
+        
+        echo "EXIT_CODE=$CLEANUP_EXIT_CODE" >> $GITHUB_ENV
+    
+    - name: 📤 رفع التغييرات
+      if: env.EXIT_CODE == '0'
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "🤖 GitHub Actions Bot"
+        git add Codes
+        
+        if git diff --staged --quiet; then
+          echo "✅ لا توجد تغييرات للرفع"
+        else
+          TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+          git commit -m "🗑️ حذف الأكواد المنتهية تلقائياً [$TIMESTAMP]"
+          git push
+          echo "✅ تم رفع التغييرات بنجاح!"
+        fi
+    
+    - name: ℹ️ لا توجد أكواد منتهية
+      if: env.EXIT_CODE != '0'
+      run: echo "✅ جميع الأكواد لا تزال صالحة"
