@@ -1,4 +1,4 @@
-name: 🗑️ حذف الأكواد المنتهية (دقيق)
+name: 🗑️ حذف الأكواد المنتهية (تلقائي)
 
 on:
   # يعمل تلقائياً عند تعديل ملف Codes
@@ -6,7 +6,7 @@ on:
     paths:
       - 'Codes'
   
-  # يعمل تلقائياً كل دقيقة (للتأكد)
+  # يعمل تلقائياً كل دقيقة
   schedule:
     - cron: '* * * * *'
   
@@ -29,13 +29,14 @@ jobs:
       with:
         python-version: '3.10'
     
-    - name: 🔍 فحص وحذف الأكواد المنتهية (دقيق)
+    - name: 🔍 فحص وحذف الأكواد المنتهية (تلقائي ذكي)
       run: |
         cat << 'PYTHON_SCRIPT' > cleanup_temp.py
         from datetime import datetime, timedelta
         import sys
         import os
         import time
+        import re
         
         def parse_duration(duration_str):
             """تحويل المدة إلى timedelta"""
@@ -54,7 +55,7 @@ jobs:
             return None
         
         print("=" * 70)
-        print("🔍 بدء فحص الأكواد (نظام دقيق)...")
+        print("🔍 بدء فحص الأكواد (نظام ذكي تلقائي)...")
         print("=" * 70)
         
         # التأكد من وجود الملف
@@ -71,90 +72,139 @@ jobs:
             sys.exit(1)
         
         now = datetime.utcnow()
-        print(f"⏰ الوقت الحالي (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"⏰ بالميلي ثانية: {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        print(f"⏰ الوقت الحالي (UTC): {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         print()
         
         valid_codes = []
         deleted_codes = []
         pending_codes = []
         deleted_count = 0
+        updated_lines = []
         
-        # المرحلة 1: فحص جميع الأكواد
-        for line in lines:
+        # المرحلة 1: فحص وتحديث جميع الأكواد
+        for line_num, line in enumerate(lines, 1):
+            original_line = line
             line = line.strip()
             if not line:
                 continue
             
             try:
                 parts = line.split('|')
-                if len(parts) != 3:
-                    print(f"⚠️  سطر بصيغة خاطئة: {line}")
-                    continue
                 
-                code = parts[0].strip()
-                date_str = parts[1].strip()
-                duration_str = parts[2].strip()
-                
-                # تحليل التاريخ
-                code_date = datetime.fromisoformat(date_str)
-                
-                # تحليل المدة
-                duration = parse_duration(duration_str)
-                if duration is None:
-                    print(f"⚠️  مدة غير صالحة لـ [{code}]: {duration_str}")
-                    continue
-                
-                # حساب وقت الانتهاء
-                expiry_date = code_date + duration
-                time_diff = (expiry_date - now).total_seconds()
-                
-                if time_diff > 0:
-                    # الكود لا يزال صالحاً
-                    valid_codes.append(line)
+                # الصيغة الجديدة: code|duration (بدون تاريخ)
+                if len(parts) == 2:
+                    code = parts[0].strip()
+                    duration_str = parts[1].strip()
                     
-                    # حساب الوقت المتبقي
-                    if time_diff > 86400:
-                        remaining = f"{int(time_diff // 86400)} يوم"
-                    elif time_diff > 3600:
-                        remaining = f"{int(time_diff // 3600)} ساعة"
-                    elif time_diff > 60:
-                        remaining = f"{int(time_diff // 60)} دقيقة"
+                    # تحويل للصيغة الكاملة بإضافة الوقت الحالي
+                    duration = parse_duration(duration_str)
+                    if duration is None:
+                        print(f"⚠️  سطر {line_num}: مدة غير صالحة - {duration_str}")
+                        continue
+                    
+                    # إضافة الوقت الحالي
+                    code_date = now
+                    full_line = f"{code}|{now.strftime('%Y-%m-%dT%H:%M:%S')}|{duration_str}"
+                    updated_lines.append((line_num, original_line, full_line))
+                    
+                    print(f"🆕 [{code}] تم إضافة التوقيت تلقائياً")
+                    print(f"   📝 من: {line}")
+                    print(f"   📝 إلى: {full_line}")
+                    
+                    # حساب وقت الانتهاء
+                    expiry_date = code_date + duration
+                    time_diff = (expiry_date - now).total_seconds()
+                    
+                    if time_diff > 0:
+                        valid_codes.append(full_line)
+                        
+                        if time_diff > 86400:
+                            remaining = f"{int(time_diff // 86400)} يوم"
+                        elif time_diff > 3600:
+                            remaining = f"{int(time_diff // 3600)} ساعة"
+                        elif time_diff > 60:
+                            remaining = f"{int(time_diff // 60)} دقيقة"
+                        else:
+                            remaining = f"{int(time_diff)} ثانية"
+                        
+                        print(f"   ✅ صالح - متبقي: {remaining}")
+                        
+                        if time_diff <= 120:
+                            pending_codes.append({
+                                'code': code,
+                                'line': full_line,
+                                'expiry': expiry_date,
+                                'wait_seconds': time_diff
+                            })
+                            print(f"   ⏳ سينتهي خلال {int(time_diff)} ثانية - في قائمة الانتظار")
+                    
+                    print()
+                    continue
+                
+                # الصيغة القديمة: code|date|duration (مع تاريخ)
+                elif len(parts) == 3:
+                    code = parts[0].strip()
+                    date_str = parts[1].strip()
+                    duration_str = parts[2].strip()
+                    
+                    # تحليل التاريخ
+                    code_date = datetime.fromisoformat(date_str)
+                    
+                    # تحليل المدة
+                    duration = parse_duration(duration_str)
+                    if duration is None:
+                        print(f"⚠️  سطر {line_num}: مدة غير صالحة - {duration_str}")
+                        continue
+                    
+                    # حساب وقت الانتهاء
+                    expiry_date = code_date + duration
+                    time_diff = (expiry_date - now).total_seconds()
+                    
+                    if time_diff > 0:
+                        valid_codes.append(line)
+                        
+                        if time_diff > 86400:
+                            remaining = f"{int(time_diff // 86400)} يوم"
+                        elif time_diff > 3600:
+                            remaining = f"{int(time_diff // 3600)} ساعة"
+                        elif time_diff > 60:
+                            remaining = f"{int(time_diff // 60)} دقيقة"
+                        else:
+                            remaining = f"{int(time_diff)} ثانية"
+                        
+                        print(f"✅ [{code}] صالح - متبقي: {remaining}")
+                        
+                        if time_diff <= 120:
+                            pending_codes.append({
+                                'code': code,
+                                'line': line,
+                                'expiry': expiry_date,
+                                'wait_seconds': time_diff
+                            })
+                            print(f"   ⏳ سينتهي خلال {int(time_diff)} ثانية - في قائمة الانتظار")
+                    
                     else:
-                        remaining = f"{int(time_diff)} ثانية"
-                    
-                    print(f"✅ [{code}] صالح - متبقي: {remaining}")
-                    
-                    # إذا كان سينتهي خلال دقيقتين، نضعه في قائمة الانتظار
-                    if time_diff <= 120:
-                        pending_codes.append({
-                            'code': code,
-                            'line': line,
-                            'expiry': expiry_date,
-                            'wait_seconds': time_diff
-                        })
-                        print(f"   ⏳ سينتهي خلال {int(time_diff)} ثانية - في قائمة الانتظار")
+                        deleted_count += 1
+                        deleted_codes.append(code)
+                        
+                        time_passed = abs(time_diff)
+                        if time_passed > 86400:
+                            passed = f"{int(time_passed // 86400)} يوم"
+                        elif time_passed > 3600:
+                            passed = f"{int(time_passed // 3600)} ساعة"
+                        elif time_passed > 60:
+                            passed = f"{int(time_passed // 60)} دقيقة"
+                        else:
+                            passed = f"{int(time_passed)} ثانية"
+                        
+                        print(f"🗑️  [{code}] منتهي منذ {passed} - سيتم حذفه")
                 
                 else:
-                    # الكود منتهي
-                    deleted_count += 1
-                    deleted_codes.append(code)
-                    
-                    # حساب الوقت المنقضي
-                    time_passed = abs(time_diff)
-                    if time_passed > 86400:
-                        passed = f"{int(time_passed // 86400)} يوم"
-                    elif time_passed > 3600:
-                        passed = f"{int(time_passed // 3600)} ساعة"
-                    elif time_passed > 60:
-                        passed = f"{int(time_passed // 60)} دقيقة"
-                    else:
-                        passed = f"{int(time_passed)} ثانية"
-                    
-                    print(f"🗑️  [{code}] منتهي منذ {passed} - سيتم حذفه")
+                    print(f"⚠️  سطر {line_num}: صيغة خاطئة - {line}")
+                    continue
             
             except Exception as e:
-                print(f"❌ خطأ في معالجة السطر: {line}")
+                print(f"❌ خطأ في معالجة سطر {line_num}: {line}")
                 print(f"   التفاصيل: {str(e)}")
                 continue
         
@@ -171,13 +221,12 @@ jobs:
                     print(f"⏱️  انتظار {int(item['wait_seconds'])} ثانية لـ [{item['code']}]...")
                     time.sleep(item['wait_seconds'])
                     
-                    # إزالة من القائمة الصالحة وإضافة للمحذوفة
                     valid_codes.remove(item['line'])
                     deleted_codes.append(item['code'])
                     deleted_count += 1
                     
                     now_after = datetime.utcnow()
-                    print(f"✓ [{item['code']}] تم حذفه في {now_after.strftime('%H:%M:%S')} بالضبط!")
+                    print(f"✓ [{item['code']}] تم حذفه في {now_after.strftime('%H:%M:%S.%f')[:-3]} بالضبط!")
             
             print("=" * 70)
         
@@ -190,6 +239,9 @@ jobs:
             print(f"✅ تم تحديث ملف Codes بنجاح")
             print(f"📊 الأكواد الصالحة: {len(valid_codes)}")
             print(f"🗑️  الأكواد المحذوفة: {deleted_count}")
+            
+            if updated_lines:
+                print(f"🆕 الأكواد التي تم تحديث توقيتها: {len(updated_lines)}")
             
             if deleted_count > 0:
                 print(f"\n📝 الأكواد التي تم حذفها:")
@@ -206,15 +258,15 @@ jobs:
         try:
             with open('Codes', 'r', encoding='utf-8') as f:
                 new_content = f.read()
-                print(f"\n✓ محتوى الملف بعد الحذف:")
+                print(f"\n✓ محتوى الملف بعد التحديث:")
                 print("─" * 50)
                 print(new_content if new_content.strip() else "(الملف فارغ - تم حذف جميع الأكواد)")
                 print("─" * 50)
         except:
             pass
         
-        # إرجاع 0 إذا تم حذف أكواد
-        sys.exit(0 if deleted_count > 0 else 1)
+        # إرجاع 0 إذا تم حذف أكواد أو تحديث
+        sys.exit(0 if (deleted_count > 0 or updated_lines) else 1)
         PYTHON_SCRIPT
         
         timeout 600 python cleanup_temp.py
@@ -228,25 +280,20 @@ jobs:
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "🤖 GitHub Actions Bot"
         
-        # إضافة ملف Codes
         git add Codes
         
-        # فحص التغييرات
         if git diff --staged --quiet; then
-          echo "✅ لا توجد تغييرات - جميع الأكواد صالحة"
+          echo "✅ لا توجد تغييرات"
         else
           echo "📝 تم العثور على تغييرات - سيتم رفعها..."
           
-          # عرض التغييرات
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           git diff --staged
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           
-          # عمل Commit
           TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
-          git commit -m "🗑️ حذف دقيق للأكواد المنتهية [$TIMESTAMP]"
+          git commit -m "🗑️ تحديث وحذف الأكواد تلقائياً [$TIMESTAMP]"
           
-          # رفع التغييرات
           echo "⬆️ جاري رفع التغييرات إلى GitHub..."
           git push origin main || git push origin master
           
@@ -254,6 +301,6 @@ jobs:
           echo "🔗 تحقق من الملف: https://github.com/${{ github.repository }}/blob/main/Codes"
         fi
     
-    - name: ℹ️ لا توجد أكواد منتهية
+    - name: ℹ️ لا توجد تغييرات
       if: env.CLEANUP_RESULT != '0'
-      run: echo "✅ جميع الأكواد لا تزال صالحة - لا توجد تغييرات"
+      run: echo "✅ جميع الأكواد صالحة - لا توجد تغييرات"
