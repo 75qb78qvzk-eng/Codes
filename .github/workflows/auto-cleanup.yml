@@ -1,9 +1,9 @@
-name: Auto Delete Expired Codes
+name: AutoDeleteCodes
 
 on:
   push:
     paths:
-      - 'Codes'
+      - Codes
   schedule:
     - cron: '* * * * *'
   workflow_dispatch:
@@ -14,116 +14,282 @@ permissions:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v3
+    
     - name: Setup Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-    - name: Clean Codes
+    
+    - name: Clean Expired Codes
       run: |
-        cat << 'EOF' > clean.py
+        cat << 'PYTHONSCRIPT' > cleanup.py
         from datetime import datetime, timedelta
-        import sys, os, time
+        import sys
+        import os
+        import time
         
-        def parse(d):
-            d = d.strip().lower()
+        def parse_duration(duration_str):
+            duration_str = duration_str.strip().lower()
             try:
-                n = int(''.join(filter(str.isdigit, d)))
-                if 's' in d: return timedelta(seconds=n)
-                elif 'm' in d: return timedelta(minutes=n)
-                elif 'h' in d: return timedelta(hours=n)
-                elif 'd' in d: return timedelta(days=n)
-            except: pass
+                if duration_str.endswith('s'):
+                    return timedelta(seconds=int(duration_str[:-1]))
+                elif duration_str.endswith('m'):
+                    return timedelta(minutes=int(duration_str[:-1]))
+                elif duration_str.endswith('h'):
+                    return timedelta(hours=int(duration_str[:-1]))
+                elif duration_str.endswith('d'):
+                    return timedelta(days=int(duration_str[:-1]))
+            except:
+                return None
             return None
         
-        print("Checking codes...")
+        print("=" * 70)
+        print("AUTO CODE CLEANUP SYSTEM")
+        print("=" * 70)
+        
         if not os.path.exists('Codes'):
-            print("File not found")
+            print("ERROR: Codes file not found!")
             sys.exit(1)
         
-        with open('Codes', 'r') as f:
-            lines = f.readlines()
+        try:
+            with open('Codes', 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"ERROR reading file: {e}")
+            sys.exit(1)
         
         now = datetime.utcnow()
-        print(f"Time: {now}")
+        print(f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        print()
         
-        valid, deleted, pending = [], [], []
+        valid_codes = []
+        deleted_codes = []
+        pending_codes = []
+        deleted_count = 0
+        updated_count = 0
         
-        for line in lines:
+        print("Processing codes...")
+        print("-" * 70)
+        
+        for line_num, line in enumerate(lines, 1):
+            original_line = line
             line = line.strip()
-            if not line: continue
-            
-            parts = line.split('|')
-            
-            if len(parts) == 2:
-                code, dur = parts[0].strip(), parts[1].strip()
-                d = parse(dur)
-                if not d: continue
-                
-                full = f"{code}|{now.isoformat()}|{dur}"
-                exp = now + d
-                diff = (exp - now).total_seconds()
-                
-                if diff > 0:
-                    valid.append(full)
-                    print(f"[{code}] Valid - {int(diff)}s left")
-                    if diff <= 120:
-                        pending.append({'code': code, 'line': full, 'wait': diff})
+            if not line:
                 continue
             
-            elif len(parts) == 3:
-                code, date, dur = parts[0].strip(), parts[1].strip(), parts[2].strip()
-                d = parse(dur)
-                if not d: continue
+            try:
+                parts = line.split('|')
                 
-                try:
-                    added = datetime.fromisoformat(date)
-                    exp = added + d
-                    diff = (exp - now).total_seconds()
+                if len(parts) == 2:
+                    code = parts[0].strip()
+                    duration_str = parts[1].strip()
                     
-                    if diff > 0:
-                        valid.append(line)
-                        print(f"[{code}] Valid - {int(diff)}s left")
-                        if diff <= 120:
-                            pending.append({'code': code, 'line': line, 'wait': diff})
+                    duration = parse_duration(duration_str)
+                    if duration is None:
+                        print(f"[Line {line_num}] Invalid duration: {duration_str}")
+                        continue
+                    
+                    code_date = now
+                    full_line = f"{code}|{now.strftime('%Y-%m-%dT%H:%M:%S')}|{duration_str}"
+                    updated_count += 1
+                    
+                    print(f"[{code}] AUTO-TIMESTAMP ADDED")
+                    print(f"  From: {line}")
+                    print(f"  To:   {full_line}")
+                    
+                    expiry_date = code_date + duration
+                    time_diff = (expiry_date - now).total_seconds()
+                    
+                    if time_diff > 0:
+                        valid_codes.append(full_line)
+                        
+                        if time_diff > 86400:
+                            remaining = f"{int(time_diff // 86400)} day(s)"
+                        elif time_diff > 3600:
+                            remaining = f"{int(time_diff // 3600)} hour(s)"
+                        elif time_diff > 60:
+                            remaining = f"{int(time_diff // 60)} minute(s)"
+                        else:
+                            remaining = f"{int(time_diff)} second(s)"
+                        
+                        print(f"  Status: VALID - Time left: {remaining}")
+                        
+                        if time_diff <= 120:
+                            pending_codes.append({
+                                'code': code,
+                                'line': full_line,
+                                'expiry': expiry_date,
+                                'wait_seconds': time_diff
+                            })
+                            print(f"  [PENDING] Will expire in {int(time_diff)} seconds")
+                    
+                    print()
+                    continue
+                
+                elif len(parts) == 3:
+                    code = parts[0].strip()
+                    date_str = parts[1].strip()
+                    duration_str = parts[2].strip()
+                    
+                    code_date = datetime.fromisoformat(date_str)
+                    
+                    duration = parse_duration(duration_str)
+                    if duration is None:
+                        print(f"[Line {line_num}] Invalid duration for [{code}]: {duration_str}")
+                        continue
+                    
+                    expiry_date = code_date + duration
+                    time_diff = (expiry_date - now).total_seconds()
+                    
+                    if time_diff > 0:
+                        valid_codes.append(line)
+                        
+                        if time_diff > 86400:
+                            remaining = f"{int(time_diff // 86400)} day(s)"
+                        elif time_diff > 3600:
+                            remaining = f"{int(time_diff // 3600)} hour(s)"
+                        elif time_diff > 60:
+                            remaining = f"{int(time_diff // 60)} minute(s)"
+                        else:
+                            remaining = f"{int(time_diff)} second(s)"
+                        
+                        print(f"[{code}] VALID - Time left: {remaining}")
+                        
+                        if time_diff <= 120:
+                            pending_codes.append({
+                                'code': code,
+                                'line': line,
+                                'expiry': expiry_date,
+                                'wait_seconds': time_diff
+                            })
+                            print(f"  [PENDING] Will expire in {int(time_diff)} seconds")
+                    
                     else:
-                        deleted.append(code)
-                        print(f"[{code}] Expired - deleting")
-                except: pass
+                        deleted_count += 1
+                        deleted_codes.append(code)
+                        
+                        time_passed = abs(time_diff)
+                        if time_passed > 86400:
+                            passed = f"{int(time_passed // 86400)} day(s)"
+                        elif time_passed > 3600:
+                            passed = f"{int(time_passed // 3600)} hour(s)"
+                        elif time_passed > 60:
+                            passed = f"{int(time_passed // 60)} minute(s)"
+                        else:
+                            passed = f"{int(time_passed)} second(s)"
+                        
+                        print(f"[{code}] EXPIRED {passed} ago - DELETING")
+                
+                else:
+                    print(f"[Line {line_num}] Invalid format: {line}")
+                    continue
+            
+            except Exception as e:
+                print(f"[Line {line_num}] ERROR processing: {line}")
+                print(f"  Details: {str(e)}")
+                continue
         
-        if pending:
-            print(f"Waiting for {len(pending)} code(s)...")
-            for item in pending:
-                if item['wait'] > 0:
-                    print(f"Wait {int(item['wait'])}s for [{item['code']}]")
-                    time.sleep(item['wait'])
-                    valid.remove(item['line'])
-                    deleted.append(item['code'])
-                    print(f"[{item['code']}] Deleted!")
+        print()
+        print("=" * 70)
         
-        with open('Codes', 'w') as f:
-            for code in valid:
-                f.write(code + '\n')
+        if pending_codes:
+            print(f"WAITING FOR {len(pending_codes)} CODE(S) TO EXPIRE...")
+            print("=" * 70)
+            
+            for item in pending_codes:
+                if item['wait_seconds'] > 0:
+                    print(f"Waiting {int(item['wait_seconds'])} seconds for [{item['code']}]...")
+                    time.sleep(item['wait_seconds'])
+                    
+                    valid_codes.remove(item['line'])
+                    deleted_codes.append(item['code'])
+                    deleted_count += 1
+                    
+                    now_after = datetime.utcnow()
+                    print(f"[{item['code']}] DELETED at {now_after.strftime('%H:%M:%S.%f')[:-3]} (EXACT TIME)")
+            
+            print("=" * 70)
         
-        print(f"Valid: {len(valid)}, Deleted: {len(deleted)}")
-        sys.exit(0 if deleted else 1)
-        EOF
+        try:
+            with open('Codes', 'w', encoding='utf-8') as f:
+                for code in valid_codes:
+                    f.write(code + '\n')
+            
+            print()
+            print("FILE UPDATE SUCCESSFUL")
+            print(f"  Valid codes remaining: {len(valid_codes)}")
+            print(f"  Codes deleted: {deleted_count}")
+            print(f"  Timestamps added: {updated_count}")
+            
+            if deleted_codes:
+                print()
+                print("DELETED CODES:")
+                for code in deleted_codes:
+                    print(f"  - {code}")
         
-        timeout 600 python clean.py
-        echo "RESULT=$?" >> $GITHUB_ENV
+        except Exception as e:
+            print(f"ERROR writing file: {e}")
+            sys.exit(1)
+        
+        print()
+        print("=" * 70)
+        
+        try:
+            with open('Codes', 'r', encoding='utf-8') as f:
+                new_content = f.read()
+                print("CURRENT FILE CONTENT:")
+                print("-" * 70)
+                if new_content.strip():
+                    print(new_content)
+                else:
+                    print("(EMPTY - All codes deleted)")
+                print("-" * 70)
+        except:
+            pass
+        
+        print()
+        print("CLEANUP COMPLETE!")
+        print("=" * 70)
+        
+        sys.exit(0 if (deleted_count > 0 or updated_count > 0) else 1)
+        PYTHONSCRIPT
+        
+        timeout 600 python cleanup.py
+        CLEANUP_CODE=$?
+        rm -f cleanup.py
+        
+        echo "CLEANUP_RESULT=$CLEANUP_CODE" >> $GITHUB_ENV
     
-    - name: Upload
+    - name: Push Changes
       run: |
-        git config --local user.email "bot@github.com"
-        git config --local user.name "Bot"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "GitHub Actions Bot"
+        
         git add Codes
-        if ! git diff --staged --quiet; then
-          git commit -m "Update codes"
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          echo "Changes detected - committing..."
+          
+          echo "============================================"
+          git diff --staged
+          echo "============================================"
+          
+          TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S UTC')
+          git commit -m "Auto-cleanup codes [$TIMESTAMP]"
+          
+          echo "Pushing to repository..."
           git push origin main || git push origin master
+          
+          echo "Changes pushed successfully!"
+          echo "View file: https://github.com/${{ github.repository }}/blob/main/Codes"
         fi
     
-    - name: Done
-      if: env.RESULT != '0'
-      run: echo "No changes"
+    - name: No Changes
+      if: env.CLEANUP_RESULT != '0'
+      run: echo "All codes are still valid - no cleanup needed"
