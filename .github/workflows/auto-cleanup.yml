@@ -1,9 +1,12 @@
-name: AutoDeleteCodes
+name: AccurateCleanup
 
 on:
   push:
     paths:
       - Codes
+    branches:
+      - main
+      - master
   schedule:
     - cron: '* * * * *'
   workflow_dispatch:
@@ -11,28 +14,37 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: accurate-cleanup
+  cancel-in-progress: false
+
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout
+    - name: Checkout Repository
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
     
     - name: Setup Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.10'
     
-    - name: Clean Expired Codes
+    - name: Process Codes with Accurate Timing
       run: |
         cat << 'PYTHONSCRIPT' > cleanup.py
         from datetime import datetime, timedelta
         import sys
         import os
         import time
+        import json
+        import subprocess
         
         def parse_duration(duration_str):
+            """Convert duration string to timedelta"""
             duration_str = duration_str.strip().lower()
             try:
                 if duration_str.endswith('s'):
@@ -47,13 +59,33 @@ jobs:
                 return None
             return None
         
+        def get_file_commit_time(filepath):
+            """Get the exact time when file was last committed"""
+            try:
+                result = subprocess.run(
+                    ['git', 'log', '-1', '--format=%aI', '--', filepath],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                commit_time_str = result.stdout.strip()
+                if commit_time_str:
+                    dt = datetime.fromisoformat(commit_time_str.replace('Z', '+00:00'))
+                    return dt.replace(tzinfo=None)
+            except Exception as e:
+                print(f"Warning: Could not get commit time - {e}")
+            return datetime.utcnow()
+        
         print("=" * 70)
-        print("AUTO CODE CLEANUP SYSTEM")
+        print("ACCURATE TIME CLEANUP SYSTEM")
         print("=" * 70)
         
         if not os.path.exists('Codes'):
-            print("ERROR: Codes file not found!")
+            print("ERROR: Codes file not found")
             sys.exit(1)
+        
+        last_commit_time = get_file_commit_time('Codes')
+        print(f"File last modified: {last_commit_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
         try:
             with open('Codes', 'r', encoding='utf-8') as f:
@@ -62,21 +94,32 @@ jobs:
             print(f"ERROR reading file: {e}")
             sys.exit(1)
         
+        metadata_file = '.codes-metadata.json'
+        metadata = {}
+        
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                print(f"Loaded metadata for {len(metadata)} existing codes")
+            except:
+                metadata = {}
+        
         now = datetime.utcnow()
-        print(f"Current time (UTC): {now.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         print()
         
         valid_codes = []
         deleted_codes = []
         pending_codes = []
+        new_metadata = {}
         deleted_count = 0
-        updated_count = 0
+        new_codes_count = 0
         
         print("Processing codes...")
         print("-" * 70)
         
         for line_num, line in enumerate(lines, 1):
-            original_line = line
             line = line.strip()
             if not line:
                 continue
@@ -93,56 +136,19 @@ jobs:
                         print(f"[Line {line_num}] Invalid duration: {duration_str}")
                         continue
                     
-                    code_date = now
-                    full_line = f"{code}|{now.strftime('%Y-%m-%dT%H:%M:%S')}|{duration_str}"
-                    updated_count += 1
+                    if code in metadata:
+                        code_added_time = datetime.fromisoformat(metadata[code])
+                        print(f"[{code}] Existing code from metadata")
+                        print(f"  Added: {code_added_time.strftime('%H:%M:%S')}")
+                    else:
+                        code_added_time = last_commit_time
+                        new_codes_count += 1
+                        print(f"[{code}] NEW code detected")
+                        print(f"  Using commit time: {code_added_time.strftime('%H:%M:%S')}")
                     
-                    print(f"[{code}] AUTO-TIMESTAMP ADDED")
-                    print(f"  From: {line}")
-                    print(f"  To:   {full_line}")
+                    new_metadata[code] = code_added_time.isoformat()
                     
-                    expiry_date = code_date + duration
-                    time_diff = (expiry_date - now).total_seconds()
-                    
-                    if time_diff > 0:
-                        valid_codes.append(full_line)
-                        
-                        if time_diff > 86400:
-                            remaining = f"{int(time_diff // 86400)} day(s)"
-                        elif time_diff > 3600:
-                            remaining = f"{int(time_diff // 3600)} hour(s)"
-                        elif time_diff > 60:
-                            remaining = f"{int(time_diff // 60)} minute(s)"
-                        else:
-                            remaining = f"{int(time_diff)} second(s)"
-                        
-                        print(f"  Status: VALID - Time left: {remaining}")
-                        
-                        if time_diff <= 120:
-                            pending_codes.append({
-                                'code': code,
-                                'line': full_line,
-                                'expiry': expiry_date,
-                                'wait_seconds': time_diff
-                            })
-                            print(f"  [PENDING] Will expire in {int(time_diff)} seconds")
-                    
-                    print()
-                    continue
-                
-                elif len(parts) == 3:
-                    code = parts[0].strip()
-                    date_str = parts[1].strip()
-                    duration_str = parts[2].strip()
-                    
-                    code_date = datetime.fromisoformat(date_str)
-                    
-                    duration = parse_duration(duration_str)
-                    if duration is None:
-                        print(f"[Line {line_num}] Invalid duration for [{code}]: {duration_str}")
-                        continue
-                    
-                    expiry_date = code_date + duration
+                    expiry_date = code_added_time + duration
                     time_diff = (expiry_date - now).total_seconds()
                     
                     if time_diff > 0:
@@ -157,7 +163,9 @@ jobs:
                         else:
                             remaining = f"{int(time_diff)} second(s)"
                         
-                        print(f"[{code}] VALID - Time left: {remaining}")
+                        print(f"  Status: VALID")
+                        print(f"  Expires in: {remaining}")
+                        print(f"  Expiry time: {expiry_date.strftime('%H:%M:%S')}")
                         
                         if time_diff <= 120:
                             pending_codes.append({
@@ -166,8 +174,7 @@ jobs:
                                 'expiry': expiry_date,
                                 'wait_seconds': time_diff
                             })
-                            print(f"  [PENDING] Will expire in {int(time_diff)} seconds")
-                    
+                            print(f"  [PENDING] Will wait and delete in {int(time_diff)}s")
                     else:
                         deleted_count += 1
                         deleted_codes.append(code)
@@ -182,35 +189,45 @@ jobs:
                         else:
                             passed = f"{int(time_passed)} second(s)"
                         
-                        print(f"[{code}] EXPIRED {passed} ago - DELETING")
+                        print(f"  Status: EXPIRED")
+                        print(f"  Expired: {passed} ago")
+                        print(f"  [DELETING]")
+                    
+                    print()
                 
                 else:
-                    print(f"[Line {line_num}] Invalid format: {line}")
+                    print(f"[Line {line_num}] Invalid format (expected: code|duration): {line}")
                     continue
             
             except Exception as e:
-                print(f"[Line {line_num}] ERROR processing: {line}")
-                print(f"  Details: {str(e)}")
+                print(f"[Line {line_num}] ERROR: {str(e)}")
+                print(f"  Line content: {line}")
                 continue
         
-        print()
         print("=" * 70)
         
         if pending_codes:
-            print(f"WAITING FOR {len(pending_codes)} CODE(S) TO EXPIRE...")
+            print(f"WAITING FOR {len(pending_codes)} CODE(S) TO EXPIRE")
             print("=" * 70)
             
             for item in pending_codes:
-                if item['wait_seconds'] > 0:
-                    print(f"Waiting {int(item['wait_seconds'])} seconds for [{item['code']}]...")
-                    time.sleep(item['wait_seconds'])
+                wait_time = item['wait_seconds']
+                if wait_time > 0 and wait_time <= 120:
+                    print(f"Waiting {int(wait_time)} seconds for [{item['code']}]...")
+                    print(f"  Will expire at: {item['expiry'].strftime('%H:%M:%S')}")
+                    
+                    time.sleep(wait_time)
                     
                     valid_codes.remove(item['line'])
                     deleted_codes.append(item['code'])
                     deleted_count += 1
                     
+                    if item['code'] in new_metadata:
+                        del new_metadata[item['code']]
+                    
                     now_after = datetime.utcnow()
-                    print(f"[{item['code']}] DELETED at {now_after.strftime('%H:%M:%S.%f')[:-3]} (EXACT TIME)")
+                    print(f"  [{item['code']}] DELETED at {now_after.strftime('%H:%M:%S.%f')[:-3]}")
+                    print()
             
             print("=" * 70)
         
@@ -219,43 +236,46 @@ jobs:
                 for code in valid_codes:
                     f.write(code + '\n')
             
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(new_metadata, f, indent=2)
+            
             print()
-            print("FILE UPDATE SUCCESSFUL")
-            print(f"  Valid codes remaining: {len(valid_codes)}")
-            print(f"  Codes deleted: {deleted_count}")
-            print(f"  Timestamps added: {updated_count}")
+            print("FILE UPDATE SUMMARY")
+            print("-" * 70)
+            print(f"Valid codes remaining: {len(valid_codes)}")
+            print(f"Codes deleted: {deleted_count}")
+            print(f"New codes added: {new_codes_count}")
+            print(f"Metadata entries: {len(new_metadata)}")
             
             if deleted_codes:
                 print()
                 print("DELETED CODES:")
                 for code in deleted_codes:
                     print(f"  - {code}")
+            
+            print()
+            print("CURRENT FILE CONTENT:")
+            print("-" * 70)
+            try:
+                with open('Codes', 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if content.strip():
+                        print(content)
+                    else:
+                        print("(EMPTY - All codes have been deleted)")
+            except:
+                pass
+            print("-" * 70)
         
         except Exception as e:
-            print(f"ERROR writing file: {e}")
+            print(f"ERROR writing files: {e}")
             sys.exit(1)
         
         print()
+        print("CLEANUP COMPLETE")
         print("=" * 70)
         
-        try:
-            with open('Codes', 'r', encoding='utf-8') as f:
-                new_content = f.read()
-                print("CURRENT FILE CONTENT:")
-                print("-" * 70)
-                if new_content.strip():
-                    print(new_content)
-                else:
-                    print("(EMPTY - All codes deleted)")
-                print("-" * 70)
-        except:
-            pass
-        
-        print()
-        print("CLEANUP COMPLETE!")
-        print("=" * 70)
-        
-        sys.exit(0 if (deleted_count > 0 or updated_count > 0) else 1)
+        sys.exit(0 if (deleted_count > 0 or new_codes_count > 0) else 1)
         PYTHONSCRIPT
         
         timeout 600 python cleanup.py
@@ -264,12 +284,13 @@ jobs:
         
         echo "CLEANUP_RESULT=$CLEANUP_CODE" >> $GITHUB_ENV
     
-    - name: Push Changes
+    - name: Commit and Push Changes
+      if: env.CLEANUP_RESULT == '0'
       run: |
         git config --local user.email "github-actions[bot]@users.noreply.github.com"
         git config --local user.name "GitHub Actions Bot"
         
-        git add Codes
+        git add Codes .codes-metadata.json
         
         if git diff --staged --quiet; then
           echo "No changes to commit"
@@ -280,16 +301,25 @@ jobs:
           git diff --staged
           echo "============================================"
           
-          TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S UTC')
+          TIMESTAMP=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
           git commit -m "Auto-cleanup codes [$TIMESTAMP]"
           
           echo "Pushing to repository..."
-          git push origin main || git push origin master
           
-          echo "Changes pushed successfully!"
-          echo "View file: https://github.com/${{ github.repository }}/blob/main/Codes"
+          for i in {1..3}; do
+            if git push origin main 2>/dev/null || git push origin master 2>/dev/null; then
+              echo "Changes pushed successfully!"
+              exit 0
+            fi
+            echo "Push failed, retrying ($i/3)..."
+            git pull --rebase origin main 2>/dev/null || git pull --rebase origin master 2>/dev/null
+            sleep 2
+          done
+          
+          echo "Failed to push after 3 attempts"
+          exit 1
         fi
     
     - name: No Changes
       if: env.CLEANUP_RESULT != '0'
-      run: echo "All codes are still valid - no cleanup needed"
+      run: echo "All codes are valid - no cleanup needed"
