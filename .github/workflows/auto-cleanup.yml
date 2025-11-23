@@ -1,0 +1,129 @@
+name: Auto Delete Expired Codes
+
+on:
+  push:
+    paths:
+      - 'Codes'
+  schedule:
+    - cron: '* * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Clean Codes
+      run: |
+        cat << 'EOF' > clean.py
+        from datetime import datetime, timedelta
+        import sys, os, time
+        
+        def parse(d):
+            d = d.strip().lower()
+            try:
+                n = int(''.join(filter(str.isdigit, d)))
+                if 's' in d: return timedelta(seconds=n)
+                elif 'm' in d: return timedelta(minutes=n)
+                elif 'h' in d: return timedelta(hours=n)
+                elif 'd' in d: return timedelta(days=n)
+            except: pass
+            return None
+        
+        print("Checking codes...")
+        if not os.path.exists('Codes'):
+            print("File not found")
+            sys.exit(1)
+        
+        with open('Codes', 'r') as f:
+            lines = f.readlines()
+        
+        now = datetime.utcnow()
+        print(f"Time: {now}")
+        
+        valid, deleted, pending = [], [], []
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            parts = line.split('|')
+            
+            if len(parts) == 2:
+                code, dur = parts[0].strip(), parts[1].strip()
+                d = parse(dur)
+                if not d: continue
+                
+                full = f"{code}|{now.isoformat()}|{dur}"
+                exp = now + d
+                diff = (exp - now).total_seconds()
+                
+                if diff > 0:
+                    valid.append(full)
+                    print(f"[{code}] Valid - {int(diff)}s left")
+                    if diff <= 120:
+                        pending.append({'code': code, 'line': full, 'wait': diff})
+                continue
+            
+            elif len(parts) == 3:
+                code, date, dur = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                d = parse(dur)
+                if not d: continue
+                
+                try:
+                    added = datetime.fromisoformat(date)
+                    exp = added + d
+                    diff = (exp - now).total_seconds()
+                    
+                    if diff > 0:
+                        valid.append(line)
+                        print(f"[{code}] Valid - {int(diff)}s left")
+                        if diff <= 120:
+                            pending.append({'code': code, 'line': line, 'wait': diff})
+                    else:
+                        deleted.append(code)
+                        print(f"[{code}] Expired - deleting")
+                except: pass
+        
+        if pending:
+            print(f"Waiting for {len(pending)} code(s)...")
+            for item in pending:
+                if item['wait'] > 0:
+                    print(f"Wait {int(item['wait'])}s for [{item['code']}]")
+                    time.sleep(item['wait'])
+                    valid.remove(item['line'])
+                    deleted.append(item['code'])
+                    print(f"[{item['code']}] Deleted!")
+        
+        with open('Codes', 'w') as f:
+            for code in valid:
+                f.write(code + '\n')
+        
+        print(f"Valid: {len(valid)}, Deleted: {len(deleted)}")
+        sys.exit(0 if deleted else 1)
+        EOF
+        
+        timeout 600 python clean.py
+        echo "RESULT=$?" >> $GITHUB_ENV
+    
+    - name: Upload
+      run: |
+        git config --local user.email "bot@github.com"
+        git config --local user.name "Bot"
+        git add Codes
+        if ! git diff --staged --quiet; then
+          git commit -m "Update codes"
+          git push origin main || git push origin master
+        fi
+    
+    - name: Done
+      if: env.RESULT != '0'
+      run: echo "No changes"
